@@ -23,7 +23,11 @@ func ReadFile(input string) ([][]int, error) {
 			}
 			curr = append(curr, num)
 		}
+		// empty line case, skip it to avoid overhead of constructing an empty bst
+		if len(curr) == 0 {
+			continue
+		}
 		ret = append(ret, curr)
 	}
-	return ret, err
+	return ret, nil
 }
