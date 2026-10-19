@@ -55,3 +55,15 @@ func HashCompute(root *Node) int {
 	traverse(root, &hash)
 	return hash
 }
+
+func compare(one *Node, two *Node) bool {
+	if one == nil && two == nil {
+		return true
+	}
+
+	if one == nil || two == nil || one.val != two.val {
+		return false
+	}
+
+	return compare(one.left, two.left) && compare(one.right, two.right)
+}
