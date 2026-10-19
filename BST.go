@@ -79,4 +79,69 @@ func main() {
 		fmt.Printf("hashTime: %f\n", hashTime.Seconds())
 	}
 
+	if args.Mode == 3 {
+		// initalize our comparison matrix
+		matrix := make([][]bool, len(roots))
+		for i := range matrix {
+			matrix[i] = make([]bool, len(roots))
+		}
+
+		timeStart := time.Now()
+		for _, groups := range hashGroups {
+			// special case where we have groups of one (there will be no other tree to compare with so skip it)
+			if len(groups) == 1 {
+				matrix[groups[0]][groups[0]] = true
+				continue
+			}
+			// flatten each group
+			arrs := [][]int{}
+			for _, id := range groups {
+				arrs = append(arrs, logic.Flatten(roots[id], []int{}))
+			}
+
+			// compare each pair of arrays with same hashes
+			for i := 0; i < len(arrs); i++ {
+				for j := i + 1; j < len(arrs); j++ {
+					isSame := logic.Compare(arrs[i], arrs[j])
+					if isSame {
+						matrix[groups[i]][groups[j]] = true
+						matrix[groups[j]][groups[i]] = true
+					}
+				}
+			}
+		}
+
+		compareTreeTime := time.Since(timeStart)
+		fmt.Printf("compareTreeTime: %f\n", compareTreeTime.Seconds())
+
+		// turn the matrix into groups of identical trees
+		// each unvisited tree starts a group made of itself plus every tree it matches
+		visited := make([]bool, len(roots))
+		groupNum := 0
+		for i := range matrix {
+			if visited[i] {
+				continue
+			}
+
+			visited[i] = true
+			group := []int{i}
+			for j := i + 1; j < len(matrix); j++ {
+				if matrix[i][j] {
+					visited[j] = true
+					group = append(group, j)
+				}
+			}
+
+			// only print groups with more than one tree
+			if len(group) > 1 {
+				fmt.Printf("group %d:", groupNum)
+				for _, id := range group {
+					fmt.Printf(" %d", id)
+				}
+				fmt.Println()
+				groupNum++
+			}
+		}
+	}
+
 }

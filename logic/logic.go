@@ -56,14 +56,28 @@ func HashCompute(root *Node) int {
 	return hash
 }
 
-func compare(one *Node, two *Node) bool {
-	if one == nil && two == nil {
-		return true
+func Flatten(node *Node, arr []int) []int {
+	if node == nil {
+		return arr
 	}
 
-	if one == nil || two == nil || one.val != two.val {
+	arr = Flatten(node.left, arr)
+	arr = append(arr, node.val)
+	arr = Flatten(node.right, arr)
+
+	return arr
+}
+
+func Compare(arrOne []int, arrTwo []int) bool {
+	if len(arrOne) != len(arrTwo) {
 		return false
 	}
 
-	return compare(one.left, two.left) && compare(one.right, two.right)
+	for i := 0; i < len(arrOne); i++ {
+		if arrOne[i] != arrTwo[i] {
+			return false
+		}
+	}
+
+	return true
 }
