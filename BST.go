@@ -6,6 +6,7 @@ import (
 	"github.com/blank-space0/Parallel-Binary-Search-Tree/fileio"
 	"github.com/blank-space0/Parallel-Binary-Search-Tree/logic"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -74,9 +75,12 @@ func main() {
 		// just compute hashes, no groupings
 		hashes := make([]int, len(nums))
 		hashStart := time.Now()
-		for id, root := range roots {
-			hash := logic.HashCompute(root)
-			hashes[id] = hash
+		////////////////////////////////////////////////////
+		// pick sequential or parallel options
+		if args.HashWorkers == 1 {
+			sequentialHash(roots, hashes)
+		} else {
+			perTreeHash(roots, hashes)
 		}
 
 		hashTime := time.Since(hashStart)
@@ -149,4 +153,42 @@ func main() {
 		}
 	}
 
+}
+
+func sequentialHash(roots []*logic.Node, hashes []int) {
+	for id, root := range roots {
+		hashes[id] = logic.HashCompute(root)
+	}
+}
+
+// execute each hash in parallel
+// we can use waitgroups to act as a barrier so we finish these operations before continuing with the program
+func perTreeHash(roots []*logic.Node, hashes []int) {
+	wg := sync.WaitGroup{}
+	for id, root := range roots {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			hashes[id] = logic.HashCompute(root)
+		}()
+	}
+	wg.Wait()
+}
+
+func hashWorkerHash(roots []*logic.Node, hashes []int, workerCount int) {
+	wg := sync.WaitGroup{}
+	for worker := 0; worker < workerCount; worker++ {
+		wg.Add(1)
+		numTrees := len(roots)
+		// fixed partitioning, split the work up as evenly as we can among workers
+		start := worker * numTrees / workerCount
+		end := (worker + 1) * numTrees / workerCount
+		go func() {
+			defer wg.Done()
+			for ; start < end; start++ {
+				hashes[start] = logic.HashCompute(roots[start])
+			}
+		}()
+	}
+	wg.Wait()
 }
