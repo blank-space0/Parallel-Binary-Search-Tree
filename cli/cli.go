@@ -12,7 +12,8 @@ type Args struct {
 	DataWorkers int
 	CompWorkers int
 	Input       string
-	Mode        int // 1 = hash only, 2 = hash + groups, 3 = hash + groups + compare
+	DoGroups    bool
+	DoCompare   bool
 }
 
 func Parse() (Args, error) {
@@ -36,13 +37,11 @@ func Parse() (Args, error) {
 		check[f.Name] = true
 	})
 
-	// checks for which args we passed in to set the mode
-	if check["hash-workers"] && check["data-workers"] && check["comp-workers"] {
-		args.Mode = 3
-	} else if check["hash-workers"] && check["data-workers"] {
-		args.Mode = 2
-	} else {
-		args.Mode = 1
+	if check["data-workers"] || check["comp-workers"] {
+		args.DoGroups = true
+	}
+	if check["comp-workers"] {
+		args.DoCompare = true
 	}
 
 	return args, nil

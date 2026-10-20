@@ -19,6 +19,7 @@ func main() {
 
 	//fmt.Println(args)
 
+	// nums is our raw file input
 	nums, err := fileio.ReadFile(args.Input)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -43,10 +44,12 @@ func main() {
 	const MAXSIZE = 1000
 	hashGroups := make(map[int][]int, MAXSIZE)
 
-	if args.Mode >= 2 {
+	// check if we need to create the groupings
+	if args.DoGroups {
 		// timer starts after tree building as per instructions
 		hashGroupStart := time.Now()
 
+		// compute hashes and group ids of same hash together
 		for id, root := range roots {
 			hash := logic.HashCompute(root)
 			hashGroups[hash] = append(hashGroups[hash], id)
@@ -68,6 +71,7 @@ func main() {
 		}
 
 	} else {
+		// just compute hashes, no groupings
 		hashes := make([]int, len(nums))
 		hashStart := time.Now()
 		for id, root := range roots {
@@ -79,7 +83,8 @@ func main() {
 		fmt.Printf("hashTime: %f\n", hashTime.Seconds())
 	}
 
-	if args.Mode == 3 {
+	// check if we need to do comparisons
+	if args.DoCompare {
 		// initalize our comparison matrix
 		matrix := make([][]bool, len(roots))
 		for i := range matrix {
@@ -93,7 +98,7 @@ func main() {
 				matrix[groups[0]][groups[0]] = true
 				continue
 			}
-			// flatten each group
+			// flatten each group (convert it to an array via inorder traversal)
 			arrs := [][]int{}
 			for _, id := range groups {
 				arrs = append(arrs, logic.Flatten(roots[id], []int{}))
