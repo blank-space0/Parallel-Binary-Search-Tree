@@ -66,8 +66,11 @@ func main() {
 		case args.HashWorkers > 1 && args.DataWorkers == 1:
 			// hash workers send (hash, id) pairs over a channel to a single inserter
 			parallelInsert(roots, hashGroups, args.HashWorkers)
+		case args.HashWorkers > 1 && args.DataWorkers == args.HashWorkers:
+			// each hash worker inserts into the map itself while holding a single mutex
+			lockWorkersInsert(roots, hashGroups, args.HashWorkers)
 		default:
-			// TODO: mutex version (hash-workers == data-workers > 1)
+			// other combinations (e.g. the optional i > j > 1 case) are not implemented
 			fmt.Fprintf(os.Stderr, "unsupported combination: -hash-workers=%d -data-workers=%d\n", args.HashWorkers, args.DataWorkers)
 			os.Exit(1)
 		}
