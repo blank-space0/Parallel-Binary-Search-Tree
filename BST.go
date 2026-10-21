@@ -80,7 +80,7 @@ func main() {
 		if args.HashWorkers == 1 {
 			sequentialHash(roots, hashes)
 		} else {
-			perTreeHash(roots, hashes)
+			hashWorkerHash(roots, hashes, args.HashWorkers)
 		}
 
 		hashTime := time.Since(hashStart)
@@ -161,20 +161,7 @@ func sequentialHash(roots []*logic.Node, hashes []int) {
 	}
 }
 
-// execute each hash in parallel
-// we can use waitgroups to act as a barrier so we finish these operations before continuing with the program
-func perTreeHash(roots []*logic.Node, hashes []int) {
-	wg := sync.WaitGroup{}
-	for id, root := range roots {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			hashes[id] = logic.HashCompute(root)
-		}()
-	}
-	wg.Wait()
-}
-
+// execute each hash in parallel over a thread pool
 func hashWorkerHash(roots []*logic.Node, hashes []int, workerCount int) {
 	wg := sync.WaitGroup{}
 	for worker := 0; worker < workerCount; worker++ {
