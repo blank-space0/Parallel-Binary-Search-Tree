@@ -10,6 +10,12 @@ import (
 	"time"
 )
 
+// no tuples in go, so I define a struct to send pairs of data through a channel
+type pair struct {
+	hash int
+	id   int
+}
+
 func main() {
 	args, err := cli.Parse()
 
@@ -50,10 +56,20 @@ func main() {
 		// timer starts after tree building as per instructions
 		hashGroupStart := time.Now()
 
-		// compute hashes and group ids of same hash together
-		for id, root := range roots {
-			hash := logic.HashCompute(root)
-			hashGroups[hash] = append(hashGroups[hash], id)
+		switch {
+		case args.HashWorkers == 1 && args.DataWorkers == 1:
+			// sequential: compute hashes and group ids of same hash together in the main thread
+			for id, root := range roots {
+				hash := logic.HashCompute(root)
+				hashGroups[hash] = append(hashGroups[hash], id)
+			}
+		case args.HashWorkers > 1 && args.DataWorkers == 1:
+			// hash workers send (hash, id) pairs over a channel to a single inserter
+			parallelInsert(roots, hashGroups, args.HashWorkers)
+		default:
+			// TODO: mutex version (hash-workers == data-workers > 1)
+			fmt.Fprintf(os.Stderr, "unsupported combination: -hash-workers=%d -data-workers=%d\n", args.HashWorkers, args.DataWorkers)
+			os.Exit(1)
 		}
 
 		hashGroupTime := time.Since(hashGroupStart)
@@ -75,8 +91,7 @@ func main() {
 		// just compute hashes, no groupings
 		hashes := make([]int, len(nums))
 		hashStart := time.Now()
-		////////////////////////////////////////////////////
-		// pick sequential or parallel options
+
 		if args.HashWorkers == 1 {
 			sequentialHash(roots, hashes)
 		} else {
@@ -163,19 +178,79 @@ func sequentialHash(roots []*logic.Node, hashes []int) {
 
 // execute each hash in parallel over a thread pool
 func hashWorkerHash(roots []*logic.Node, hashes []int, workerCount int) {
-	wg := sync.WaitGroup{}
+	workerWait := sync.WaitGroup{}
 	for worker := 0; worker < workerCount; worker++ {
-		wg.Add(1)
+		workerWait.Add(1)
 		numTrees := len(roots)
 		// fixed partitioning, split the work up as evenly as we can among workers
 		start := worker * numTrees / workerCount
 		end := (worker + 1) * numTrees / workerCount
 		go func() {
-			defer wg.Done()
-			for ; start < end; start++ {
-				hashes[start] = logic.HashCompute(roots[start])
+			defer workerWait.Done()
+			for curr := start; curr < end; curr++ {
+				hashes[curr] = logic.HashCompute(roots[curr])
 			}
 		}()
 	}
-	wg.Wait()
+	workerWait.Wait()
+}
+
+func parallelInsert(roots []*logic.Node, hashes map[int][]int, workerCount int) {
+	workerWait := sync.WaitGroup{}
+	insertWait := sync.WaitGroup{}
+	// buffering is a slight optimization, now workers dont have to wait as much on the insertions
+	ch := make(chan pair, workerCount)
+
+	// spawn a single goroutine to do the map inserts
+	insertWait.Add(1)
+	go func() {
+		defer insertWait.Done()
+		insertIntoMap(hashes, ch)
+	}()
+
+	for worker := range workerCount {
+		workerWait.Add(1)
+		start := worker * len(roots) / workerCount
+		end := (worker + 1) * len(roots) / workerCount
+		go func() {
+			defer workerWait.Done()
+			for curr := start; curr < end; curr++ {
+				hash := logic.HashCompute(roots[curr])
+				ch <- pair{hash, curr}
+			}
+		}()
+	}
+
+	workerWait.Wait()
+	close(ch)
+	insertWait.Wait()
+}
+
+func insertIntoMap(hashes map[int][]int, ch chan pair) {
+	for hashPair := range ch {
+		hashes[hashPair.hash] = append(hashes[hashPair.hash], hashPair.id)
+	}
+}
+
+func lockWorkersInsert(roots []*logic.Node, hashes map[int][]int, workerCount int) {
+	lock := sync.Mutex{}
+	workerWait := sync.WaitGroup{}
+
+	for worker := range workerCount {
+		workerWait.Add(1)
+		start := worker * len(roots) / workerCount
+		end := (worker + 1) * len(roots) / workerCount
+
+		go func() {
+			defer workerWait.Done()
+			for curr := start; curr < end; curr++ {
+				hash := logic.HashCompute(roots[curr])
+				lock.Lock()
+				hashes[hash] = append(hashes[hash], curr)
+				lock.Unlock()
+			}
+		}()
+
+	}
+	workerWait.Wait()
 }
