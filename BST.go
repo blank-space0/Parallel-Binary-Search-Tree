@@ -16,6 +16,16 @@ type pair struct {
 	id   int
 }
 
+// a unit of comparison work, the ids of the two trees we want to compare
+type idPair struct {
+	idOne int
+	idTwo int
+}
+
+// the spec only gives us -comp-workers, so there is no flag to pick between the two parallel versions
+// flip this to true to run the goroutine per comparison version instead of the worker pool (for the report)
+const goroutinePerCompare = false
+
 func main() {
 	args, err := cli.Parse()
 
@@ -114,28 +124,20 @@ func main() {
 		}
 
 		timeStart := time.Now()
-		for _, groups := range hashGroups {
-			// special case where we have groups of one (there will be no other tree to compare with so skip it)
-			if len(groups) == 1 {
-				matrix[groups[0]][groups[0]] = true
-				continue
-			}
-			// flatten each group (convert it to an array via inorder traversal)
-			arrs := [][]int{}
-			for _, id := range groups {
-				arrs = append(arrs, logic.Flatten(roots[id], []int{}))
-			}
 
-			// compare each pair of arrays with same hashes
-			for i := 0; i < len(arrs); i++ {
-				for j := i + 1; j < len(arrs); j++ {
-					isSame := logic.Compare(arrs[i], arrs[j])
-					if isSame {
-						matrix[groups[i]][groups[j]] = true
-						matrix[groups[j]][groups[i]] = true
-					}
-				}
-			}
+		switch {
+		case args.CompWorkers == 1:
+			// sequential: do every comparison in the main thread
+			sequentialCompare(roots, hashGroups, matrix)
+		case args.CompWorkers > 1 && goroutinePerCompare:
+			// spawn a goroutine for every single comparison
+			goroutineCompare(roots, hashGroups, matrix)
+		case args.CompWorkers > 1:
+			// main thread pushes pairs into a bounded buffer, comp-workers goroutines pull them out
+			bufferWorkersCompare(roots, hashGroups, matrix, args.CompWorkers)
+		default:
+			fmt.Fprintf(os.Stderr, "unsupported combination: -comp-workers=%d\n", args.CompWorkers)
+			os.Exit(1)
 		}
 
 		compareTreeTime := time.Since(timeStart)
@@ -256,4 +258,211 @@ func lockWorkersInsert(roots []*logic.Node, hashes map[int][]int, workerCount in
 
 	}
 	workerWait.Wait()
+}
+
+// flatten every tree in the group (convert it to an array via inorder traversal)
+// flats is indexed by tree id so workers can look up arrays from just an idPair
+func flattenGroup(roots []*logic.Node, group []int, flats [][]int) {
+	for _, id := range group {
+		flats[id] = logic.Flatten(roots[id], []int{})
+	}
+}
+
+// ids of every tree that shares its hash with another tree, these are the only ones we need to flatten
+func multiTreeIds(hashGroups map[int][]int) []int {
+	ids := []int{}
+	for _, group := range hashGroups {
+		if len(group) > 1 {
+			ids = append(ids, group...)
+		}
+	}
+	return ids
+}
+
+func sequentialCompare(roots []*logic.Node, hashGroups map[int][]int, matrix [][]bool) {
+	flats := make([][]int, len(roots))
+	for _, group := range hashGroups {
+		// special case where we have groups of one (there will be no other tree to compare with so skip it)
+		if len(group) == 1 {
+			matrix[group[0]][group[0]] = true
+			continue
+		}
+		flattenGroup(roots, group, flats)
+
+		// compare each pair of arrays with same hashes
+		for i := 0; i < len(group); i++ {
+			for j := i + 1; j < len(group); j++ {
+				one, two := group[i], group[j]
+				if logic.Compare(flats[one], flats[two]) {
+					matrix[one][two] = true
+					matrix[two][one] = true
+				}
+			}
+		}
+	}
+}
+
+// first parallel version: one goroutine per comparison
+// each goroutine writes to its own two cells of the matrix, so no lock is needed
+func goroutineCompare(roots []*logic.Node, hashGroups map[int][]int, matrix [][]bool) {
+	compareWait := sync.WaitGroup{}
+	flats := make([][]int, len(roots))
+
+	// flattening is most of the work (compare usually exits on the first mismatch)
+	// so it has to be parallel too, same idea here: one goroutine per tree
+	flattenWait := sync.WaitGroup{}
+	for _, id := range multiTreeIds(hashGroups) {
+		flattenWait.Add(1)
+		go func() {
+			defer flattenWait.Done()
+			flats[id] = logic.Flatten(roots[id], []int{})
+		}()
+	}
+	// every array has to be ready before any comparison reads it
+	flattenWait.Wait()
+
+	for _, group := range hashGroups {
+		if len(group) == 1 {
+			matrix[group[0]][group[0]] = true
+			continue
+		}
+
+		for i := 0; i < len(group); i++ {
+			for j := i + 1; j < len(group); j++ {
+				one, two := group[i], group[j]
+				compareWait.Add(1)
+				go func() {
+					defer compareWait.Done()
+					if logic.Compare(flats[one], flats[two]) {
+						matrix[one][two] = true
+						matrix[two][one] = true
+					}
+				}()
+			}
+		}
+	}
+	compareWait.Wait()
+}
+
+// second parallel version: a fixed pool of comp-workers goroutines fed by a bounded buffer
+func bufferWorkersCompare(roots []*logic.Node, hashGroups map[int][]int, matrix [][]bool, workerCount int) {
+	workerWait := sync.WaitGroup{}
+	flats := make([][]int, len(roots))
+	// spec says the buffer can only hold up to comp-workers items at a time
+	buffer := newCompBuffer(workerCount)
+
+	// flattening is most of the work (compare usually exits on the first mismatch)
+	// so split it across the workers first, same fixed partitioning as hashWorkerHash
+	ids := multiTreeIds(hashGroups)
+	flattenWait := sync.WaitGroup{}
+	for worker := range workerCount {
+		flattenWait.Add(1)
+		start := worker * len(ids) / workerCount
+		end := (worker + 1) * len(ids) / workerCount
+		go func() {
+			defer flattenWait.Done()
+			for curr := start; curr < end; curr++ {
+				flats[ids[curr]] = logic.Flatten(roots[ids[curr]], []int{})
+			}
+		}()
+	}
+	// every array has to be ready before any worker starts comparing
+	flattenWait.Wait()
+
+	for range workerCount {
+		workerWait.Add(1)
+		go func() {
+			defer workerWait.Done()
+			// keep pulling work until the buffer is closed and drained
+			for {
+				work, ok := buffer.pop()
+				if !ok {
+					return
+				}
+				if logic.Compare(flats[work.idOne], flats[work.idTwo]) {
+					matrix[work.idOne][work.idTwo] = true
+					matrix[work.idTwo][work.idOne] = true
+				}
+			}
+		}()
+	}
+
+	// single thread (main) traverses the map and produces the work
+	for _, group := range hashGroups {
+		if len(group) == 1 {
+			matrix[group[0]][group[0]] = true
+			continue
+		}
+
+		for i := 0; i < len(group); i++ {
+			for j := i + 1; j < len(group); j++ {
+				buffer.push(idPair{group[i], group[j]})
+			}
+		}
+	}
+
+	// no more work, wake up any workers waiting on an empty buffer so they can exit
+	buffer.close()
+	workerWait.Wait()
+}
+
+// concurrent buffer: a ring buffer protected by one mutex
+// notFull is waited on by the producer when the buffer is full
+// notEmpty is waited on by the workers when the buffer is empty
+// waiting on a condition sleeps the goroutine, so nobody spins
+type compBuffer struct {
+	lock     sync.Mutex
+	notFull  *sync.Cond
+	notEmpty *sync.Cond
+	items    []idPair
+	head     int
+	count    int
+	closed   bool
+}
+
+func newCompBuffer(capacity int) *compBuffer {
+	buffer := &compBuffer{items: make([]idPair, capacity)}
+	// both conditions share the buffer's mutex
+	buffer.notFull = sync.NewCond(&buffer.lock)
+	buffer.notEmpty = sync.NewCond(&buffer.lock)
+	return buffer
+}
+
+func (buffer *compBuffer) push(work idPair) {
+	buffer.lock.Lock()
+	// loop instead of if, since we have to recheck the condition after waking up
+	for buffer.count == len(buffer.items) {
+		buffer.notFull.Wait()
+	}
+	// tail is head + count, wrapped around the end of the slice
+	buffer.items[(buffer.head+buffer.count)%len(buffer.items)] = work
+	buffer.count++
+	buffer.notEmpty.Signal()
+	buffer.lock.Unlock()
+}
+
+// returns false once the buffer is closed and there is nothing left to take
+func (buffer *compBuffer) pop() (idPair, bool) {
+	buffer.lock.Lock()
+	for buffer.count == 0 && !buffer.closed {
+		buffer.notEmpty.Wait()
+	}
+	if buffer.count == 0 {
+		buffer.lock.Unlock()
+		return idPair{}, false
+	}
+	work := buffer.items[buffer.head]
+	buffer.head = (buffer.head + 1) % len(buffer.items)
+	buffer.count--
+	buffer.notFull.Signal()
+	buffer.lock.Unlock()
+	return work, true
+}
+
+func (buffer *compBuffer) close() {
+	buffer.lock.Lock()
+	buffer.closed = true
+	// broadcast since every waiting worker needs to see that we are done
+	buffer.notEmpty.Broadcast()
+	buffer.lock.Unlock()
 }
